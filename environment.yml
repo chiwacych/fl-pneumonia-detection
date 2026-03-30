@@ -1,0 +1,36 @@
+name: fl-pneumonia-detection
+channels:
+  - pytorch
+  - nvidia
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.11
+  - pip
+  # PyTorch with CUDA 12 (CPU fallback works too)
+  - pytorch::pytorch=2.2.*
+  - pytorch::torchvision=0.17.*
+  - pytorch::pytorch-cuda=12.1
+  # Core ML
+  - numpy<2.0
+  - pillow
+  - scikit-learn
+  - matplotlib
+  - seaborn
+  - tqdm
+  # Notebook
+  - jupyter
+  - ipykernel
+  - ipywidgets
+  - pip:
+    # Differential privacy
+    - opacus==1.4.0
+    # Experiment tracking
+    - wandb
+    # Metrics
+    - torchmetrics
+    # Azure ML SDK
+    - azure-ai-ml
+    - azure-identity
+    # Web server for local testing
+    - flask

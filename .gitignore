@@ -1,0 +1,58 @@
+# Info / chat exports (local only)
+info/
+
+# Environment secrets
+*.env
+.env*
+secrets.json
+kaggle.json
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.Python
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Jupyter checkpoints
+.ipynb_checkpoints/
+*/.ipynb_checkpoints/
+
+# Large binary files (models / data)
+models/*.pth
+models/*.pt
+models/*.onnx
+data/
+
+# Results — keep JSON metrics, ignore plots/images
+results/plots/
+results/models/
+*.png
+*.jpg
+*.jpeg
+*.pdf
+
+# Conda / pip
+*.conda
+pip-log.txt
+
+# Azure
+.azure/
+azureml-models/
+__azureml__/
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# IDE
+.vscode/settings.json
+.idea/
+*.swp
+
+# Claude Code internal
+.claude/

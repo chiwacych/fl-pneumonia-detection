@@ -1,0 +1,9 @@
+# Run this as the first cell in any Kaggle notebook:
+# !pip install -r requirements_kaggle.txt --quiet
+#
+# Or install individually:
+# !pip install opacus==1.4.0 wandb torchmetrics --quiet
+
+opacus==1.4.0
+wandb
+torchmetrics

@@ -1,0 +1,16 @@
+# Azure ML managed endpoint conda environment
+# Used by deploy.py when creating the endpoint
+name: fl-pneumonia-endpoint
+channels:
+  - pytorch
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.11
+  - pip
+  - pip:
+    - torch==2.2.*
+    - torchvision==0.17.*
+    - opacus==1.4.0
+    - pillow
+    - azureml-defaults
