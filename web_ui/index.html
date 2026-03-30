@@ -260,12 +260,8 @@
 </footer>
 
 <script>
-  // ── Configuration ──────────────────────────────────────────
-  // Replace with values printed by azure_deploy/deploy.py
-  // Or load from environment at build time
-  const SCORING_URI = "YOUR_AZURE_SCORING_URI";
-  const API_KEY     = "YOUR_AZURE_API_KEY";
-  // ──────────────────────────────────────────────────────────
+  // Credentials are kept server-side in .env
+  // All requests go to the local Flask proxy at /predict
 
   const dropZone   = document.getElementById("drop-zone");
   const fileInput  = document.getElementById("file-input");
@@ -318,12 +314,9 @@
       // Convert image to base64
       const base64 = await toBase64(selectedFile);
 
-      const response = await fetch(SCORING_URI, {
+      const response = await fetch("/predict", {
         method:  "POST",
-        headers: {
-          "Content-Type":  "application/json",
-          "Authorization": `Bearer ${API_KEY}`,
-        },
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ image: base64 }),
       });
 

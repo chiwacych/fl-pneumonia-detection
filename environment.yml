@@ -32,5 +32,5 @@ dependencies:
     # Azure ML SDK
     - azure-ai-ml
     - azure-identity
-    # Web server for local testing
-    - flask
+    # Web server for local demo
+    - flask==3.*
