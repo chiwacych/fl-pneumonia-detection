@@ -1,0 +1,330 @@
+"""Run once locally to generate hospital_0/1/2_training.ipynb"""
+import json, os
+
+HOSPITAL_INFO = [
+    {"id": 0, "name": "Urban Teaching Hospital",    "pneumonia_ratio": 0.70},
+    {"id": 1, "name": "Rural Community Hospital",   "pneumonia_ratio": 0.80},
+    {"id": 2, "name": "Pediatric Specialty Center", "pneumonia_ratio": 0.60},
+]
+
+def make_hospital_notebook(h):
+    hid    = h["id"]
+    hname  = h["name"]
+    pratio = h["pneumonia_ratio"]
+
+    cells = [
+        # 0 — markdown
+        {
+            "cell_type": "markdown",
+            "source": [
+                f"# Hospital {hid} — {hname}\n",
+                "**FL-Pneumonia-Detection | Distributed Simulation**\n",
+                "\n",
+                f"Non-IID pneumonia prevalence target: **{pratio:.0%}**\n",
+                "\n",
+                "### Per-round workflow\n",
+                "1. Download current global model from WandB\n",
+                "2. Train locally (with Opacus DP)\n",
+                "3. Upload local weights back to WandB\n",
+                "4. Run `fl_aggregator.ipynb` with the same `ROUND_NUM`\n",
+                "\n",
+                "> **Only change `ROUND_NUM`** before each round. Everything else is fixed."
+            ],
+            "metadata": {}
+        },
+        # 1 — install
+        {
+            "cell_type": "code",
+            "source": ["!pip install opacus==1.4.0 wandb --quiet\n", "print('Packages ready')"],
+            "metadata": {}, "outputs": [], "execution_count": None
+        },
+        # 2 — config
+        {
+            "cell_type": "code",
+            "source": [
+                "import os, json, random\n",
+                "from collections import OrderedDict\n",
+                "import numpy as np\n",
+                "import torch\n",
+                "import torch.nn as nn\n",
+                "from torch.utils.data import Dataset, DataLoader\n",
+                "from torchvision import models, transforms\n",
+                "from PIL import Image\n",
+                "import wandb\n",
+                "from opacus import PrivacyEngine\n",
+                "from opacus.validators import ModuleValidator\n",
+                "from kaggle_secrets import UserSecretsClient\n",
+                "\n",
+                "SEED = 42\n",
+                "random.seed(SEED); np.random.seed(SEED); torch.manual_seed(SEED)\n",
+                "\n",
+                f"HOSPITAL_ID   = {hid}   # fixed\n",
+                f"HOSPITAL_NAME = '{hname}'\n",
+                f"PNEUMONIA_RATIO = {pratio}  # non-IID target for this hospital\n",
+                "\n",
+                "# ── UPDATE THIS BEFORE EACH ROUND ──\n",
+                "ROUND_NUM = 1\n",
+                "# ───────────────────────────────────\n",
+                "\n",
+                "FL_CONFIG = {\n",
+                "    'num_rounds':     10,\n",
+                "    'num_clients':    3,\n",
+                "    'local_epochs':   3,\n",
+                "    'learning_rate':  1e-3,\n",
+                "    'lr_decay':       0.95,\n",
+                "    'batch_size':     32,\n",
+                "    'use_dp':         True,\n",
+                "    'target_epsilon': 10.0,\n",
+                "    'target_delta':   1e-5,\n",
+                "    'max_grad_norm':  1.0,\n",
+                "}\n",
+                "\n",
+                "DATA_ROOT         = '/kaggle/input/chest-xray-pneumonia/chest_xray/chest_xray'\n",
+                "WORK_DIR          = '/kaggle/working'\n",
+                "WANDB_PROJECT     = 'fl-pneumonia-detection'\n",
+                "GLOBAL_ARTIFACT   = 'global-model'\n",
+                "HOSPITAL_ARTIFACT = 'hospital-weights'\n",
+                "\n",
+                "device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')\n",
+                f"print(f'Hospital {hid} | Round {{ROUND_NUM}} | Device: {{device}}')\n",
+            ],
+            "metadata": {}, "outputs": [], "execution_count": None
+        },
+        # 3 — wandb login
+        {
+            "cell_type": "code",
+            "source": [
+                "wandb_key = UserSecretsClient().get_secret('WANDB_API_KEY')\n",
+                "wandb.login(key=wandb_key)\n",
+                "print('WandB logged in')"
+            ],
+            "metadata": {}, "outputs": [], "execution_count": None
+        },
+        # 4 — dataset class
+        {
+            "cell_type": "code",
+            "source": [
+                "IMAGENET_MEAN = [0.485, 0.456, 0.406]\n",
+                "IMAGENET_STD  = [0.229, 0.224, 0.225]\n",
+                "\n",
+                "class ChestXrayDataset(Dataset):\n",
+                "    CLASSES = ['NORMAL', 'PNEUMONIA']\n",
+                "    def __init__(self, data_dir=None, transform=None, images=None, labels=None):\n",
+                "        self.transform = transform\n",
+                "        if images is not None:\n",
+                "            self.images, self.labels = list(images), list(labels)\n",
+                "        else:\n",
+                "            self.images, self.labels = [], []\n",
+                "            for label, cls in enumerate(self.CLASSES):\n",
+                "                cls_dir = os.path.join(data_dir, cls)\n",
+                "                if not os.path.isdir(cls_dir): continue\n",
+                "                for fname in sorted(os.listdir(cls_dir)):\n",
+                "                    if fname.lower().endswith(('.jpg','.jpeg','.png')):\n",
+                "                        self.images.append(os.path.join(cls_dir, fname))\n",
+                "                        self.labels.append(label)\n",
+                "    def __len__(self): return len(self.images)\n",
+                "    def __getitem__(self, idx):\n",
+                "        img = Image.open(self.images[idx]).convert('RGB')\n",
+                "        return (self.transform(img) if self.transform else img), self.labels[idx]\n",
+                "\n",
+                "def get_train_transforms():\n",
+                "    return transforms.Compose([\n",
+                "        transforms.Resize((224, 224)),\n",
+                "        transforms.RandomHorizontalFlip(),\n",
+                "        transforms.RandomRotation(10),\n",
+                "        transforms.ColorJitter(brightness=0.2, contrast=0.2),\n",
+                "        transforms.ToTensor(),\n",
+                "        transforms.Normalize(IMAGENET_MEAN, IMAGENET_STD),\n",
+                "    ])\n",
+                "\n",
+                "full_train = ChestXrayDataset(os.path.join(DATA_ROOT, 'train'))\n",
+                "print(f'Full train set loaded: {len(full_train)} images')\n",
+            ],
+            "metadata": {}, "outputs": [], "execution_count": None
+        },
+        # 5 — partition
+        {
+            "cell_type": "code",
+            "source": [
+                "def get_hospital_partition(dataset, hospital_id, num_hospitals=3, seed=42):\n",
+                "    \"\"\"\n",
+                "    Deterministic non-IID partition.\n",
+                "    All hospital notebooks use the same function + seed so each hospital\n",
+                "    always gets the same indices, regardless of run order.\n",
+                "    \"\"\"\n",
+                "    ratios = [0.70, 0.80, 0.60]\n",
+                "    rng = np.random.default_rng(seed)\n",
+                "    normal_idx    = [i for i, l in enumerate(dataset.labels) if l == 0]\n",
+                "    pneumonia_idx = [i for i, l in enumerate(dataset.labels) if l == 1]\n",
+                "    rng.shuffle(normal_idx)\n",
+                "    rng.shuffle(pneumonia_idx)\n",
+                "    hospital_size = len(dataset) // num_hospitals\n",
+                "    n_ptr, p_ptr = 0, 0\n",
+                "    for hid in range(num_hospitals):\n",
+                "        p_count = int(hospital_size * ratios[hid])\n",
+                "        n_count = hospital_size - p_count\n",
+                "        if hid == num_hospitals - 1:\n",
+                "            n_count = len(normal_idx)    - n_ptr\n",
+                "            p_count = len(pneumonia_idx) - p_ptr\n",
+                "        if hid == hospital_id:\n",
+                "            h_idx = normal_idx[n_ptr:n_ptr + n_count] + pneumonia_idx[p_ptr:p_ptr + p_count]\n",
+                "            rng2 = np.random.default_rng(seed + hid)\n",
+                "            rng2.shuffle(h_idx)\n",
+                "            return h_idx\n",
+                "        n_ptr += n_count\n",
+                "        p_ptr += p_count\n",
+                "\n",
+                "my_indices = get_hospital_partition(full_train, HOSPITAL_ID)\n",
+                "my_labels  = [full_train.labels[i] for i in my_indices]\n",
+                "print(f'Hospital {HOSPITAL_ID} partition: {len(my_indices)} samples')\n",
+                "print(f'  NORMAL={my_labels.count(0)}  PNEUMONIA={my_labels.count(1)}')\n",
+                "print(f'  Pneumonia rate: {my_labels.count(1)/len(my_labels):.1%} (target {PNEUMONIA_RATIO:.0%})')\n",
+                "\n",
+                "my_dataset = ChestXrayDataset(\n",
+                "    images=[full_train.images[i] for i in my_indices],\n",
+                "    labels=my_labels,\n",
+                "    transform=get_train_transforms(),\n",
+                ")\n",
+                "train_loader = DataLoader(\n",
+                "    my_dataset, batch_size=FL_CONFIG['batch_size'],\n",
+                "    shuffle=True, num_workers=2, pin_memory=True, drop_last=True,\n",
+                ")\n",
+                "print(f'  DataLoader: {len(train_loader)} batches/epoch')\n",
+            ],
+            "metadata": {}, "outputs": [], "execution_count": None
+        },
+        # 6 — download global model
+        {
+            "cell_type": "code",
+            "source": [
+                "def create_model():\n",
+                "    model = models.efficientnet_b0(weights=models.EfficientNet_B0_Weights.DEFAULT)\n",
+                "    num_features = model.classifier[1].in_features\n",
+                "    model.classifier = nn.Sequential(\n",
+                "        nn.Dropout(p=0.2, inplace=True),\n",
+                "        nn.Linear(num_features, 2),\n",
+                "    )\n",
+                "    return ModuleValidator.fix(model)\n",
+                "\n",
+                "print(f'Downloading {GLOBAL_ARTIFACT}:round-{ROUND_NUM - 1} from WandB...')\n",
+                "api      = wandb.Api()\n",
+                "artifact = api.artifact(f'{WANDB_PROJECT}/{GLOBAL_ARTIFACT}:round-{ROUND_NUM - 1}', type='model')\n",
+                "art_dir  = artifact.download(root=f'{WORK_DIR}/global_model')\n",
+                "ckpt     = torch.load(os.path.join(art_dir, 'global_model.pth'), map_location='cpu')\n",
+                "model    = create_model()\n",
+                "model.load_state_dict(ckpt['model_state_dict'])\n",
+                "model    = model.to(device)\n",
+                "print(f'Global model (round {ROUND_NUM - 1}) loaded')\n",
+            ],
+            "metadata": {}, "outputs": [], "execution_count": None
+        },
+        # 7 — local training
+        {
+            "cell_type": "code",
+            "source": [
+                "run = wandb.init(\n",
+                "    project=WANDB_PROJECT,\n",
+                "    name=f'hospital-{HOSPITAL_ID}-round-{ROUND_NUM}',\n",
+                "    job_type='local-training',\n",
+                "    config={**FL_CONFIG, 'hospital_id': HOSPITAL_ID,\n",
+                "            'hospital_name': HOSPITAL_NAME, 'round': ROUND_NUM,\n",
+                "            'n_samples': len(my_dataset)},\n",
+                ")\n",
+                "\n",
+                "lr        = FL_CONFIG['learning_rate'] * (FL_CONFIG['lr_decay'] ** ROUND_NUM)\n",
+                "optimizer = torch.optim.Adam(model.parameters(), lr=lr)\n",
+                "criterion = nn.CrossEntropyLoss()\n",
+                "epsilon_used = None\n",
+                "\n",
+                "if FL_CONFIG['use_dp']:\n",
+                "    eps_per_round  = FL_CONFIG['target_epsilon'] / FL_CONFIG['num_rounds']\n",
+                "    privacy_engine = PrivacyEngine()\n",
+                "    model, optimizer, train_loader = privacy_engine.make_private_with_epsilon(\n",
+                "        module=model, optimizer=optimizer, data_loader=train_loader,\n",
+                "        target_epsilon=eps_per_round, target_delta=FL_CONFIG['target_delta'],\n",
+                "        epochs=FL_CONFIG['local_epochs'], max_grad_norm=FL_CONFIG['max_grad_norm'],\n",
+                "    )\n",
+                "    print(f'Opacus PrivacyEngine attached (eps_per_round={eps_per_round:.2f})')\n",
+                "\n",
+                "print(f'Training {FL_CONFIG[\"local_epochs\"]} local epochs...')\n",
+                "model.train()\n",
+                "total_loss, correct, total = 0.0, 0, 0\n",
+                "\n",
+                "for epoch in range(FL_CONFIG['local_epochs']):\n",
+                "    ep_loss, ep_correct, ep_total = 0.0, 0, 0\n",
+                "    for images, labels in train_loader:\n",
+                "        images, labels = images.to(device), labels.to(device)\n",
+                "        optimizer.zero_grad()\n",
+                "        out  = model(images)\n",
+                "        loss = criterion(out, labels)\n",
+                "        loss.backward()\n",
+                "        optimizer.step()\n",
+                "        ep_loss    += loss.item() * images.size(0)\n",
+                "        ep_correct += (out.argmax(1) == labels).sum().item()\n",
+                "        ep_total   += labels.size(0)\n",
+                "    print(f'  Epoch {epoch+1}: loss={ep_loss/ep_total:.4f} acc={ep_correct/ep_total:.4f}')\n",
+                "    total_loss += ep_loss; correct += ep_correct; total += ep_total\n",
+                "\n",
+                "avg_loss = total_loss / total\n",
+                "avg_acc  = correct    / total\n",
+                "\n",
+                "if FL_CONFIG['use_dp']:\n",
+                "    epsilon_used = privacy_engine.get_epsilon(delta=FL_CONFIG['target_delta'])\n",
+                "    print(f'Epsilon consumed this round: {epsilon_used:.4f}')\n",
+                "\n",
+                "wandb.log({'round': ROUND_NUM, 'train/loss': avg_loss,\n",
+                "           'train/accuracy': avg_acc, 'privacy/epsilon': epsilon_used})\n",
+                "print(f'Loss={avg_loss:.4f} | Acc={avg_acc:.4f}')\n",
+            ],
+            "metadata": {}, "outputs": [], "execution_count": None
+        },
+        # 8 — upload weights
+        {
+            "cell_type": "code",
+            "source": [
+                "ckpt_path = f'{WORK_DIR}/hospital_{HOSPITAL_ID}_round_{ROUND_NUM}.pth'\n",
+                "torch.save({\n",
+                "    'model_state_dict': model.state_dict(),\n",
+                "    'hospital_id':      HOSPITAL_ID,\n",
+                "    'hospital_name':    HOSPITAL_NAME,\n",
+                "    'round':            ROUND_NUM,\n",
+                "    'n_samples':        len(my_dataset),\n",
+                "    'train_loss':       avg_loss,\n",
+                "    'train_accuracy':   avg_acc,\n",
+                "    'epsilon':          epsilon_used,\n",
+                "}, ckpt_path)\n",
+                "\n",
+                "artifact = wandb.Artifact(\n",
+                "    name=HOSPITAL_ARTIFACT, type='model',\n",
+                "    metadata={'hospital_id': HOSPITAL_ID, 'round': ROUND_NUM,\n",
+                "              'n_samples': len(my_dataset), 'train_accuracy': float(avg_acc),\n",
+                "              'epsilon': float(epsilon_used) if epsilon_used else None},\n",
+                ")\n",
+                "artifact.add_file(ckpt_path, name=f'hospital_{HOSPITAL_ID}.pth')\n",
+                "run.log_artifact(artifact, aliases=[f'h{HOSPITAL_ID}-round-{ROUND_NUM}'])\n",
+                "wandb.finish()\n",
+                "print(f'Weights uploaded: \"{HOSPITAL_ARTIFACT}:h{HOSPITAL_ID}-round-{ROUND_NUM}\"')\n",
+                "print(f'Next: run fl_aggregator.ipynb with ROUND_NUM={ROUND_NUM}')\n",
+            ],
+            "metadata": {}, "outputs": [], "execution_count": None
+        },
+    ]
+    return {
+        "nbformat": 4, "nbformat_minor": 0,
+        "metadata": {
+            "kernelspec": {"display_name": "Python 3", "language": "python", "name": "python3"},
+            "language_info": {"name": "python"},
+            "accelerator": "GPU"
+        },
+        "cells": cells
+    }
+
+
+if __name__ == "__main__":
+    out_dir = os.path.dirname(__file__)
+    for h in HOSPITAL_INFO:
+        nb   = make_hospital_notebook(h)
+        path = os.path.join(out_dir, f'hospital_{h["id"]}_training.ipynb')
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(nb, f, indent=1)
+        print(f"Written: {path}")
